@@ -12,11 +12,6 @@ use Illuminate\Http\Request;
 use App\Http\Controllers\Auth\RegisteredUserController;
 use Illuminate\Support\Facades\Route;
 
-/*
-|--------------------------------------------------------------------------
-| Auth Routes (Public)
-|--------------------------------------------------------------------------
-*/
 
 Route::post('/register', [RegisteredUserController::class, 'store'])
     ->middleware('guest')
@@ -26,11 +21,7 @@ Route::post('/login', [AuthenticatedSessionController::class, 'login'])
     ->middleware('guest')
     ->name('login');
 
-/*
-|--------------------------------------------------------------------------
-| Authenticated Routes (Customer + Admin)
-|--------------------------------------------------------------------------
-*/
+
 
 Route::middleware('auth:sanctum')->group(function () {
 
@@ -39,16 +30,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthenticatedSessionController::class, 'logout'])
         ->name('logout');
 
-    // ── Products (قراءة — للجميع) ─────────────────────────────────────────
     Route::get('/products/{id}',[ProductController::class, 'show']);  // ← جديد
 
-    // ── Cart ─────────────────────────────────────────────────────────────────
     Route::get('/cart',                        [CartController::class, 'show']);
     Route::post('/cart/items',                 [CartController::class, 'addItem']);
     Route::patch('/cart/items/{cartItem}',     [CartController::class, 'updateItem']);
     Route::delete('/cart/items/{cartItem}',    [CartController::class, 'removeItem']);
 
-    // ── Checkout ──────────────────────────────────────────────────────────────
     Route::middleware('throttle:checkout')
         ->post('/checkout', [CheckoutController::class, 'store'])
         ->name('checkout');
@@ -56,31 +44,23 @@ Route::middleware('auth:sanctum')->group(function () {
 
 Route::middleware('throttle:products')->get('/products',[ProductController::class, 'index']);
 
-/*
-|--------------------------------------------------------------------------
-| Admin Routes
-|--------------------------------------------------------------------------
-*/
 
 Route::middleware(['auth:sanctum', 'admin'])
     ->prefix('admin')
     ->name('admin.')
     ->group(function () {
 
-        // ── Product Management ────────────────────────────────────────────
         Route::post('/products',                        [ProductAdminController::class, 'store']);
         Route::put('/products/{product}',               [ProductAdminController::class, 'update']);
         Route::delete('/products/{product}',            [ProductAdminController::class, 'destroy']);
         Route::patch('/products/{product}/toggle-status',[ProductAdminController::class, 'toggleStatus']);
 
-        // ── Sales Reports (اليوم 3) ───────────────────────────────────────
         Route::get('reports/summary',        [SalesReportController::class, 'summary']);
         Route::post('reports/retry-failed',  [SalesReportController::class, 'retryFailed']);
         Route::post('reports/generate',      [SalesReportController::class, 'generate']);
         Route::get('reports/{date}',         [SalesReportController::class, 'show']);
         Route::get('reports',                [SalesReportController::class, 'index']);
 
-        // ── Benchmark (اليوم 4) ───────────────────────────────────────────
         Route::prefix('benchmark')->group(function () {
             Route::get('status',      [BenchmarkController::class, 'status']);
             Route::get('full',        [BenchmarkController::class, 'full']);
@@ -90,7 +70,6 @@ Route::middleware(['auth:sanctum', 'admin'])
             Route::get('async',       [BenchmarkController::class, 'async']);
         });
 
-        // ── Cache Management (اليوم 5) ────────────────────────────────────
         Route::prefix('cache')->group(function () {
             Route::get('test',      [CacheController::class, 'test']);
             Route::post('flush',    [CacheController::class, 'flush']);
