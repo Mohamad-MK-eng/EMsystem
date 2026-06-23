@@ -1,0 +1,752 @@
+Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {
+    return $request->user();
+});
+Route::post('/register', [RegisteredUserController::class, 'store'])
+    ->middleware('guest')
+    ->name('register');
+
+Route::post('/login', [AuthenticatedSessionController::class, 'login'])
+    ->middleware('guest')
+    ->name('login');
+
+Route::post('/logout', [AuthenticatedSessionController::class, 'logout'])
+    ->middleware('auth:sanctum')
+    ->name('logout');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Admin Product Routes
+    |--------------------------------------------------------------------------
+    */
+
+    Route::middleware(['auth:sanctum', 'admin'])
+    ->prefix('admin/products')
+    ->group(function () {
+
+        Route::post('/', [ProductAdminController::class, 'store']);
+
+        Route::put(
+            '/{product}',
+            [ProductAdminController::class, 'update']
+        );
+
+        Route::delete(
+            '/{product}',
+            [ProductAdminController::class, 'destroy']
+        );
+
+        Route::patch(
+            '/{product}/toggle-status',
+            [ProductAdminController::class, 'toggleStatus']
+        );
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | get Products
+    |--------------------------------------------------------------------------
+    */
+
+
+    Route::middleware('auth:sanctum')
+    ->get('/products', [ProductController::class, 'index']);
+-------------------------------------------------------------------------------------------
+class ProductController extends Controller
+{
+    //
+    /*
+|--------------------------------------------------------------------------
+| View Products
+|--------------------------------------------------------------------------
+*/
+ public function __construct(
+        private ProductService $productService
+    ) {}
+
+public function index(Request $request)
+{
+    $products = $this->productService->getProducts($request);
+
+    return response()->json($products);
+}
+}
+//-----------------------------------------------------------------------------
+class ProductService
+{
+    /*
+|--------------------------------------------------------------------------
+| Get Products With Pagination
+|--------------------------------------------------------------------------
+|
+| Returns paginated products with inventory information.
+|
+*/
+
+public function getProducts(Request $request)
+{
+    $query = Product::query();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Soft Delete Filtering
+    |--------------------------------------------------------------------------
+    */
+
+    $query->whereNull('deleted_at');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Eager Loading
+    |--------------------------------------------------------------------------
+    */
+
+    if (config('performance.use_eager_loading')) {
+
+        $query->with('inventory');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Sorting
+    |--------------------------------------------------------------------------
+    */
+
+    $query->latest();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Pagination
+    |--------------------------------------------------------------------------
+    */
+
+   if (config('performance.use_pagination')) {
+
+        $products = $query->paginate(
+            perPage: 15,
+            page: (int) $request->query('page', 1)
+        );
+
+        return [
+
+            'current_page' => $products->currentPage(),
+
+            'last_page' => $products->lastPage(),
+
+            'total_items' => $products->total(),
+
+            'per_page' => $products->perPage(),
+
+            'current_size' => $products->count(),
+
+            'data' => $products->items(),
+        ];
+    }
+
+
+    return [
+
+        'total_items' => $query->count(),
+
+        'data' => $query->get(),
+    ];
+}
+
+
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Create Product
+    |--------------------------------------------------------------------------
+    */
+
+  public function createProduct(array $data): Product
+{
+    $callback = function () use ($data) {
+
+        $product = Product::create([
+            'name' => $data['name'],
+            'description' => $data['description'] ?? null,
+            'price' => $data['price'],
+            'status' => 'active',
+        ]);
+       // throw new Exception('Simulated failure after product creation.');
+        Inventory::create([
+            'product_id' => $product->id,
+            'stock_quantity' => $data['stock_quantity'],
+        ]);
+
+        return $product->load('inventory');
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Transactions
+    |--------------------------------------------------------------------------
+    */
+
+    if (config('performance.use_transactions')) {
+
+        return DB::transaction($callback);
+
+    }
+
+    return $callback();
+}
+
+    /*
+    |--------------------------------------------------------------------------
+    | Update Product
+    |--------------------------------------------------------------------------
+    */
+
+ public function updateProduct(Product $product, array $data): Product
+{
+    $callback = function () use ($product, $data) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Product Update
+        |--------------------------------------------------------------------------
+        */
+
+        $product->update([
+            'name' => $data['name'] ?? $product->name,
+            'description' => $data['description'] ?? $product->description,
+            'price' => $data['price'] ?? $product->price,
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Inventory Update
+        |--------------------------------------------------------------------------
+        */
+
+        if (isset($data['increment'])) {
+
+            $inventory = $product->inventory()->first();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Inventory Validation
+            |--------------------------------------------------------------------------
+            */
+
+            if (!$inventory) {
+
+                abort(404, 'Inventory not found.');
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Optimistic Locking
+            |--------------------------------------------------------------------------
+            |
+            | The client sends the version it used while editing.
+            | If another operation modifies the inventory before
+            | this update executes, the WHERE condition fails.
+            |
+            */
+
+            if (config('performance.use_optimistic_locking')) {
+
+                $requestVersion = (int) $data['version'];
+
+                $updated = Inventory::where('id', $inventory->id)
+                    ->where('version', $requestVersion)
+                    ->update([
+                        'stock_quantity' => $inventory->stock_quantity + $data['increment'] ,
+                        'version' => $inventory->version + 1,
+                    ]);
+
+                /*
+                |--------------------------------------------------------------------------
+                | Conflict Detection
+                |--------------------------------------------------------------------------
+                */
+
+                if (!$updated) {
+
+                    abort(
+                        409,
+                        'Product inventory has been modified by another process, try again.'
+                    );
+                }
+
+            } else {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Traditional Update
+                |--------------------------------------------------------------------------
+                */
+
+                $inventory->update([
+                 'stock_quantity' => $inventory->stock_quantity + $data['increment'] ,
+                ]);
+            }
+        }
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Transactions
+    |--------------------------------------------------------------------------
+    */
+
+    if (config('performance.use_transactions')) {
+
+        DB::transaction($callback);
+
+    } else {
+
+        $callback();
+    }
+
+    return $product->fresh('inventory');
+}
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Soft Delete Product
+    |--------------------------------------------------------------------------
+    */
+      public function deleteProduct(Product $product): void
+{
+    $callback = function () use ($product) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Soft Delete Protection
+        |--------------------------------------------------------------------------
+        | Prevent deleting products that still exist
+        | in active carts.
+        |
+        */
+
+        if (
+            config('performance.use_soft_delete_protection')
+            &&
+            $product->cartItems()->exists()
+        ) {
+
+            abort(
+                409,
+                'Product exists in active carts.'
+            );
+        }
+
+        $product->delete();
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Transactions
+    |--------------------------------------------------------------------------
+    */
+
+    if (config('performance.use_transactions')) {
+
+        DB::transaction($callback);
+
+    } else {
+
+        $callback();
+    }
+}
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Toggle Product Status
+    |--------------------------------------------------------------------------
+    */
+
+    public function toggleStatus(Product $product): Product
+{
+
+    $callback = function () use ($product) {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Soft Delete Protection
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            config('performance.use_soft_delete_protection')  && $product->trashed()
+        ) {
+
+            abort(
+                409,
+                'Cannot change status of a deleted product.'
+            );
+        }
+
+        $newStatus = $product->status === 'active'
+            ? 'inactive'
+            : 'active';
+
+        $product->update([
+            'status' => $newStatus
+        ]);
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Transactions
+    |--------------------------------------------------------------------------
+    */
+
+    if (config('performance.use_transactions')) {
+
+        DB::transaction($callback);
+
+    } else {
+
+        $callback();
+    }
+
+    return $product->fresh();
+ }
+
+
+}
+//-------------------------------------------------------------------------------------------
+class CartController extends Controller
+{
+    public function __construct(
+        protected CartService $cartService
+    ) {}
+
+    /**
+     * Display user's cart.
+     */
+    public function show(Request $request): JsonResponse
+    {
+        $cart = $this->cartService
+            ->getUserCart($request->user());
+
+        return response()->json($cart);
+    }
+
+    /**
+     * Add item to cart.
+     */
+    public function addItem(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'product_id' => ['required', 'exists:products,id'],
+            'quantity' => ['required', 'integer', 'min:1'],
+        ]);
+
+        $cartItem = $this->cartService
+            ->addItem($request->user(), $validated);
+
+        return response()->json([
+            'message' => 'Product added to cart successfully.',
+            'data' => $cartItem
+        ], 201);
+    }
+
+    /**
+     * Update cart item quantity.
+     */
+    public function updateItem(
+        Request $request,
+        CartItem $cartItem
+    ): JsonResponse {
+
+        $validated = $request->validate([
+            'increment' => ['required', 'integer'],
+        ]);
+
+        $updatedItem = $this->cartService
+            ->updateItem(
+                $request->user(),
+                $cartItem,
+                $validated
+            );
+
+        return response()->json([
+            'message' => 'Cart item updated successfully.',
+            'data' => $updatedItem
+        ]);
+    }
+
+    /**
+     * Remove cart item.
+     */
+    public function removeItem(
+        Request $request,
+        CartItem $cartItem
+    ): JsonResponse {
+
+        $this->cartService
+            ->removeItem(
+                $request->user(),
+                $cartItem
+            );
+
+        return response()->json([
+            'message' => 'Item removed from cart successfully.'
+        ]);
+    }
+}
+//--------------------------------------------------------------------------
+class CartService
+{
+    /**
+     * Display authenticated user's cart.
+     *
+     * Non-functional concern:
+     * - Performance optimization using eager loading.
+     */
+    public function getUserCart(User $user)
+    {
+        $query = $user->cart();
+
+        /*
+    |--------------------------------------------------------------------------
+    | Eager Loading
+    |--------------------------------------------------------------------------
+    |
+    */
+
+        if (config('performance.use_eager_loading')) {
+
+            $query->with([
+                'items.product.inventory'
+            ]);
+        }
+
+        $cart_data = $query->first();
+
+        return [
+            'cart_id' => $cart_data->id,
+
+            'items' => $cart_data->items->map(function ($item) {
+
+                return [
+                    'item_id' => $item->id,
+                    'product_id' => $item->product_id,
+                    'product_name' => $item->product->name,
+                    'description' => $item->product->description,
+                    'quantity' => $item->quantity,
+                    'unit_price' => $item->product->price,
+                    'stock_quantity' => $item->product->inventory->stock_quantity,
+                    'version' => $item->product->inventory->version,
+                ];
+            }),
+
+            'total_price' => round($cart_data->items->sum(function ($item) {
+                return $item->quantity * $item->product->price;
+            }) ,2)
+        ];
+    }
+
+    /**
+     * Add product to cart.
+     *
+     * Non-functional concerns:
+     * - Data integrity
+     * - Race condition prevention
+     * - Atomic database operation
+     */
+    public function addItem(User $user, array $data): CartItem
+    {
+        $callback = function () use ($user, $data) {
+
+            $cart = $user->cart;
+
+            $productQuery = Product::query();
+
+
+
+
+
+
+
+            $product = $productQuery
+                ->findOrFail($data['product_id']);
+
+            /*
+        |--------------------------------------------------------------------------
+        | Duplicate Validation
+        |--------------------------------------------------------------------------
+        */
+
+
+
+                $existingItem = CartItem::where('cart_id', $cart->id)
+                    ->where('product_id', $product->id)
+                    ->exists();
+
+                if ($existingItem) {
+
+                    throw ValidationException::withMessages([
+                        'product_id' => 'Product already exists in cart.'
+                    ]);
+                }
+
+
+            /*
+        |--------------------------------------------------------------------------
+        | Stock Validation
+        |--------------------------------------------------------------------------
+        */
+            // قرار تصميمي يناقش لاحقا
+            if (config('performance.use_stock_validation')) {
+
+                if ($data['quantity'] > $product->inventory->stock_quantity) {
+
+                    throw ValidationException::withMessages([
+                        'quantity' => 'Requested quantity exceeds available stock.'
+                    ]);
+                }
+            }
+
+            /*
+        |--------------------------------------------------------------------------
+        | Create Cart Item
+        |--------------------------------------------------------------------------
+        */
+
+            return CartItem::create([
+                'cart_id' => $cart->id,
+                'product_id' => $product->id,
+                'quantity' => $data['quantity'],
+            ]);
+        };
+
+        /*
+    |--------------------------------------------------------------------------
+    | Transaction Handling
+    |--------------------------------------------------------------------------
+    */
+
+        if (config('performance.use_transactions')) {
+
+            return DB::transaction($callback);
+        }
+
+        return $callback();
+    }
+
+    /**
+     * Update cart item quantity.
+     *
+     * Non-functional concerns:
+     * - Data consistency
+     * - Stock integrity
+     */
+    public function updateItem(User $user, CartItem $cartItem, array $data): CartItem
+    {
+        return DB::transaction(function () use ($user, $cartItem, $data) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | Ownership Validation
+            |--------------------------------------------------------------------------
+            */
+
+
+            // قرار تصميمي
+            if (config('performance.use_cart_ownership_validation')) {
+
+                if ($cartItem->cart->user_id !== $user->id) {
+
+                    abort(403);
+                }
+            }
+
+            $product = $cartItem->product()
+                ->with('inventory')
+                ->first();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Stock Validation
+            |--------------------------------------------------------------------------
+            */
+
+
+
+            if (config('performance.use_stock_validation')) {
+
+                if (
+                    $data['increment'] + $cartItem->quantity >
+                    $product->inventory->stock_quantity
+                ) {
+
+                    throw ValidationException::withMessages([
+                        'quantity' => 'Requested quantity exceeds available stock.'
+                    ]);
+                }
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Update Quantity
+            |--------------------------------------------------------------------------
+            */
+
+            $cartItem->update([
+                'quantity' => $data['increment'] + $cartItem->quantity
+            ]);
+
+            return $cartItem->fresh();
+        });
+    }
+
+    /**
+     * Remove item from cart.
+     *
+     * Non-functional concern:
+     * - Atomic delete operation
+     */
+    public function removeItem(User $user, CartItem $cartItem): void
+    {
+        $callback = (function () use ($user, $cartItem) {
+
+            /*
+            |--------------------------------------------------------------------------
+            | Ownership Validation
+            |--------------------------------------------------------------------------
+            */
+
+            if ($cartItem->cart->user_id !== $user->id) {
+                abort(403);
+            }
+
+            $cartItem->delete();
+        });
+
+        if (config('performance.use_transactions')) {
+            DB::transaction($callback);
+        } else {
+            $callback();
+        }
+    }
+}
+//----------------------------------------------------------
+// Old and new environment variables
+USE_TRANSACTIONS=false
+USE_PESSIMISTIC_LOCKING=true
+USE_OPTIMISTIC_LOCKING=true
+USE_SOFT_DELETE_PROTECTION=true
+USE_EAGER_LOADING=false
+USE_STOCK_VALIDATION=true
+USE_CART_OWNERSHIP_VALIDATION=true
+USE_PAGINATION=false
+# new variables --------
+USE_RATE_LIMITING=true
+USE_ASYNC_JOBS=true
+USE_BATCH_PROCESSING=true
+USE_CACHING=true
+
+PAYMENT_SIMULATION=true
+PAYMENT_LATENCY_MIN=100
+PAYMENT_LATENCY_MAX=500
+PAYMENT_FAILURE_RATE=0.1
